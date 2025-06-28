@@ -1,30 +1,49 @@
 import os
+import json
 import telebot
 from telebot.types import Message
 from pydrive.auth import GoogleAuth
 from pydrive.drive import GoogleDrive
+from oauth2client.service_account import ServiceAccountCredentials
 
-# ✅ Telegram Bot Token (Hardcoded)
-BOT_TOKEN = '7958998385:AAFgajM3uh6Tuwhjv17a-1itNHUg0xcV1sI'
-bot = telebot.TeleBot(BOT_TOKEN)
+# ✅ Telegram Bot Token (HARD CODED)
+BOT_TOKEN = "7958998385:AAFgajM3uh6Tuwhjv17a-1itNHUg0xcV1sI"
 
-# 🔐 Google Drive Auth (Using saved credentials.json)
+# ✅ Google Drive Service Account Credentials (HARD CODED)
+CREDENTIAL_JSON = {
+ "type": "service_account",
+ "project_id": "adminneast",
+ "private_key_id": "xxxx",
+ "private_key": "-----BEGIN PRIVATE KEY-----\nYOUR-PRIVATE-KEY-HERE\n-----END PRIVATE KEY-----\n",
+ "client_email": "your-service-email@adminneast.iam.gserviceaccount.com",
+ "client_id": "12345678901234567890",
+ "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+ "token_uri": "https://oauth2.googleapis.com/token",
+ "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+ "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/your-service-email%40adminneast.iam.gserviceaccount.com"
+}
+
+# ✅ Authenticate Google Drive
+scope = ['https://www.googleapis.com/auth/drive']
+credentials = ServiceAccountCredentials.from_json_keyfile_dict(CREDENTIAL_JSON, scope)
 gauth = GoogleAuth()
-gauth.LocalWebserverAuth()
+gauth.credentials = credentials
 drive = GoogleDrive(gauth)
 
-# 🧠 User-wise current Course/Module folders
+bot = telebot.TeleBot(BOT_TOKEN)
+
+# 🔁 User-session storage
 user_courses = {}
 user_modules = {}
 
-# 📁 Create or get folder inside Google Drive
+# 📁 Create or get folder inside Drive
 def create_or_get_folder(name, parent_id=None):
     query = f"title='{name}' and mimeType='application/vnd.google-apps.folder' and trashed=false"
     if parent_id:
         query += f" and '{parent_id}' in parents"
-    folders = drive.ListFile({'q': query}).GetList()
-    if folders:
-        return folders[0]['id']
+    file_list = drive.ListFile({'q': query}).GetList()
+    if file_list:
+        return file_list[0]['id']
     metadata = {'title': name, 'mimeType': 'application/vnd.google-apps.folder'}
     if parent_id:
         metadata['parents'] = [{'id': parent_id}]
@@ -32,45 +51,42 @@ def create_or_get_folder(name, parent_id=None):
     folder.Upload()
     return folder['id']
 
-def get_root_courses_folder():
+def get_root_folder():
     return create_or_get_folder("Courses")
 
 @bot.message_handler(commands=['folder'])
-def set_folder(message: Message):
+def handle_folder(message: Message):
     try:
-        course_name = message.text.split(" ", 1)[1].strip()
-        root_id = get_root_courses_folder()
-        course_id = create_or_get_folder(course_name, parent_id=root_id)
-        user_courses[message.from_user.id] = course_id
+        name = message.text.split(" ", 1)[1].strip()
+        root = get_root_folder()
+        folder_id = create_or_get_folder(name, root)
+        user_courses[message.from_user.id] = folder_id
         user_modules.pop(message.from_user.id, None)
-        bot.reply_to(message, f"✅ Course set: `{course_name}`", parse_mode='Markdown')
+        bot.reply_to(message, f"✅ Course set: `{name}`", parse_mode="Markdown")
     except:
         bot.reply_to(message, "⚠️ Use: /folder Course Name")
 
 @bot.message_handler(commands=['module'])
-def set_module(message: Message):
-    user_id = message.from_user.id
-    if user_id not in user_courses:
-        bot.reply_to(message, "⚠️ Set a course first using /folder")
-        return
+def handle_module(message: Message):
+    uid = message.from_user.id
+    if uid not in user_courses:
+        return bot.reply_to(message, "⚠️ Set course first using /folder")
     try:
-        module_name = message.text.split(" ", 1)[1].strip()
-        module_id = create_or_get_folder(module_name, parent_id=user_courses[user_id])
-        user_modules[user_id] = module_id
-        bot.reply_to(message, f"✅ Module set: `{module_name}`", parse_mode='Markdown')
+        name = message.text.split(" ", 1)[1].strip()
+        mod_id = create_or_get_folder(name, user_courses[uid])
+        user_modules[uid] = mod_id
+        bot.reply_to(message, f"✅ Module set: `{name}`", parse_mode="Markdown")
     except:
         bot.reply_to(message, "⚠️ Use: /module Module Name")
 
 @bot.message_handler(content_types=['document', 'video', 'audio', 'photo'])
-def upload_file(message: Message):
-    user_id = message.from_user.id
-    if user_id not in user_modules:
-        bot.reply_to(message, "⚠️ Set a module using /module before uploading.")
-        return
+def handle_upload(message: Message):
+    uid = message.from_user.id
+    if uid not in user_modules:
+        return bot.reply_to(message, "⚠️ Use /module to select module folder")
 
     file_name = "file"
     file_info = None
-
     if message.document:
         file_info = bot.get_file(message.document.file_id)
         file_name = message.document.file_name
@@ -82,33 +98,31 @@ def upload_file(message: Message):
         file_name = message.audio.file_name or "audio.mp3"
     elif message.photo:
         file_info = bot.get_file(message.photo[-1].file_id)
-        file_name = "image.jpg"
+        file_name = "photo.jpg"
     else:
-        bot.reply_to(message, "❌ Unsupported file type.")
-        return
+        return bot.reply_to(message, "❌ Unsupported file type.")
 
-    # Download the file
+    # Download file
     downloaded = bot.download_file(file_info.file_path)
     with open(file_name, 'wb') as f:
         f.write(downloaded)
 
     # Prepare title and description
     caption = message.caption or ""
-    title = f"{file_name} | TG:- @Skillneast"
-    description = f"{caption}\n\nTG:- @Skillneast"
+    desc = f"{caption}\n\nTG:- @Skillneast"
 
-    # Upload to Google Drive
+    # Upload to Drive
     gfile = drive.CreateFile({
-        'title': title,
-        'parents': [{'id': user_modules[user_id]}],
-        'description': description
+        'title': file_name,
+        'parents': [{'id': user_modules[uid]}],
+        'description': desc
     })
     gfile.SetContentFile(file_name)
     gfile.Upload()
     os.remove(file_name)
 
-    # Share link
     link = f"https://drive.google.com/file/d/{gfile['id']}/view"
-    bot.reply_to(message, f"✅ Uploaded: [{title}]({link})", parse_mode='Markdown')
+    bot.reply_to(message, f"✅ Uploaded: [{file_name}]({link})", parse_mode="Markdown")
 
+# ✅ Bot Start
 bot.polling()
